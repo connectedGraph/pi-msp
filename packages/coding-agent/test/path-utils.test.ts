@@ -1,8 +1,8 @@
-import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
+import { expandPath, resolveReadPath, resolveSandboxed, resolveToCwd } from "../src/core/tools/path-utils.ts";
 
 describe("path-utils", () => {
 	describe("expandPath", () => {
@@ -169,6 +169,79 @@ describe("path-utils", () => {
 
 			// This works because tryMacOSScreenshotPath() uses case-insensitive matching
 			expect(result).toBe(join(tempDir, macosName));
+		});
+	});
+
+	describe("resolveSandboxed", () => {
+		let workspace: string;
+
+		beforeEach(() => {
+			workspace = mkdtempSync(join(tmpdir(), "pi-sandbox-"));
+		});
+
+		afterEach(() => {
+			try {
+				const files = readdirSync(workspace);
+				for (const file of files) {
+					unlinkSync(join(workspace, file));
+				}
+				rmdirSync(workspace);
+			} catch {
+				// Ignore cleanup errors
+			}
+		});
+
+		it("should pass paths inside the workspace", () => {
+			const rel = "src/file.ts";
+			const result = resolveSandboxed(rel, workspace, workspace);
+			expect(result).toBe(resolve(workspace, rel));
+		});
+
+		it("should pass absolute paths inside the workspace", () => {
+			const abs = join(workspace, "inside.txt");
+			expect(resolveSandboxed(abs, workspace, workspace)).toBe(abs);
+		});
+
+		it("should reject an absolute path outside the workspace", () => {
+			const outside = resolve(tmpdir(), "elsewhere", "secret.txt");
+			expect(() => resolveSandboxed(outside, workspace, workspace)).toThrow(/Path not found/);
+		});
+
+		it("should reject a relative path that escapes via ..", () => {
+			expect(() => resolveSandboxed("../../etc/passwd", workspace, workspace)).toThrow(/Path not found/);
+		});
+
+		it("should not leak the reason (no 'workspace' / 'outside' wording)", () => {
+			const outside = resolve(tmpdir(), "elsewhere", "secret.txt");
+			expect(() => resolveSandboxed(outside, workspace, workspace)).toThrow(/Path not found/);
+			try {
+				resolveSandboxed(outside, workspace, workspace);
+			} catch (e: any) {
+				expect(e.message).not.toMatch(/workspace|outside|sandbox|escape/i);
+			}
+		});
+
+		// Symlink escape is the canonical clamp bypass. Creating symlinks needs
+		// developer mode / admin on Windows, so skip there; exercise it on posix.
+		const canSymlink = process.platform !== "win32";
+		(canSymlink ? it : it.skip)("should reject a symlink pointing outside the workspace", () => {
+			const linkPath = join(workspace, "pw");
+			const target = resolve(tmpdir(), "pi-sandbox-target-passwd");
+			writeFileSync(target, "secret");
+			symlinkSync(target, linkPath, "file");
+			try {
+				expect(() => resolveSandboxed(linkPath, workspace, workspace)).toThrow(/Path not found/);
+			} finally {
+				unlinkSync(target);
+			}
+		});
+
+		(canSymlink ? it : it.skip)("should accept a symlink that stays inside the workspace", () => {
+			const real = join(workspace, "real.txt");
+			writeFileSync(real, "x");
+			const link = join(workspace, "link.txt");
+			symlinkSync(real, link, "file");
+			expect(resolveSandboxed(link, workspace, workspace)).toBe(real);
 		});
 	});
 });

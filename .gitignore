@@ -24,6 +24,27 @@ packages/ai/src/providers/.model-generation-*/
 *.swo
 *~
 
+# ---- pi-msp: in-process MSP kernel (vendored ModelShellProxy) ----
+# Swift build products from `bash packages/msp-kernel/build.sh`. The vendored
+# Swift *source* under packages/msp-kernel/swift/Implementations is tracked;
+# only the compiled .build tree is ignored (221MB of object files, module
+# caches, and index stores).
+packages/msp-kernel/swift/.build/
+# Compiled kernel shared library, wherever build.sh dropped it (also copied next
+# to the deliverable by install scripts; that copy lives under dist/ which is
+# ignored below).
+*.so
+*.dylib
+# SwiftPM package state (not currently generated, keep out defensively)
+packages/msp-kernel/swift/.swiftpm/
+packages/msp-kernel/swift/Package.resolved
+
+# ---- pi-msp: bundled CPython runtime (from bundle-python.sh) ----
+# The self-contained python/ tree next to the deliverable is a build artifact;
+# regenerate with `bash packages/msp-kernel/bundle-python.sh <dest>`.
+packages/msp-kernel/python/
+
+
 # Package specific
 .npm/
 coverage/

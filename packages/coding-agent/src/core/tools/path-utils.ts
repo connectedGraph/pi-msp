@@ -1,6 +1,6 @@
 import { accessSync, constants } from "node:fs";
 import { access } from "node:fs/promises";
-import { normalizePath, resolvePath } from "../../utils/paths.ts";
+import { canonicalizePath, getCwdRelativePath, normalizePath, resolvePath } from "../../utils/paths.ts";
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
 
@@ -47,6 +47,43 @@ export function expandPath(filePath: string): string {
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
 	return resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+}
+
+/**
+ * Verify an already-resolved absolute path is inside `workspaceRoot`, following
+ * symlinks first so a link pointing outside the workspace is rejected. Throws a
+ * "Path not found" error otherwise — the same wording ls uses and the same
+ * "does not exist" semantics the MSP sandbox exposes. No mention of being
+ * outside the workspace: the path simply does not exist for the caller.
+ *
+ * `originalForMessage` is the path shown in the error (typically the raw,
+ * un-canonicalized input) so diagnostics stay readable.
+ */
+export function assertInsideWorkspace(absolutePath: string, workspaceRoot: string, originalForMessage: string): void {
+	const canonical = canonicalizePath(absolutePath);
+	// canonicalizePath falls back to the raw path when the target does not exist
+	// yet (e.g. a file write is about to create it). getCwdRelativePath handles
+	// that case lexically: a not-yet-existing path under the workspace still
+	// resolves to a relative path that does not start with "..".
+	const rel = getCwdRelativePath(canonical, workspaceRoot);
+	if (rel === undefined) {
+		throw new Error(`Path not found: ${originalForMessage}`);
+	}
+}
+
+/**
+ * Resolve a path against `cwd` and enforce that it lies inside `workspaceRoot`.
+ * Used by the MSP-backed file operations (read/edit/write/ls) so the structured
+ * tools share the same workspace boundary the MSP bash sandbox already
+ * enforces — `cd /etc && cat passwd` is no more reachable via `read` than via
+ * bash. This always enforces the boundary; the kernel-availability fallback to
+ * plain host resolution lives in msp-file-operations, which calls resolveToCwd
+ * (not this) when the kernel is unavailable.
+ */
+export function resolveSandboxed(filePath: string, cwd: string, workspaceRoot: string): string {
+	const resolved = resolveToCwd(filePath, cwd);
+	assertInsideWorkspace(resolved, workspaceRoot, filePath);
+	return resolved;
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {

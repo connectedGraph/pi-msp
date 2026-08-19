@@ -98,6 +98,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
+import { isMspKernelEnvironment } from "./msp-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
@@ -108,6 +109,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createMspFileOperations } from "./tools/msp-file-operations.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -1050,8 +1052,17 @@ export class AgentSession {
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
+		// pi-msp: the MSP sandbox maps the session workspace to the virtual root
+		// "/" (mspRunJson's workspace argument becomes MSPAppleWorkspace's root),
+		// so `pwd` inside bash returns "/". Show the model the same root it sees
+		// in the sandbox instead of the real host path, keeping prompt and shell
+		// consistent. Only affects the *displayed* cwd — tool path resolution
+		// still uses this._cwd, so relative paths keep resolving to the real host
+		// workspace that maps to the virtual root.
+		const promptCwd = isMspKernelEnvironment() ? "/" : this._cwd;
+
 		this._baseSystemPromptOptions = {
-			cwd: this._cwd,
+			cwd: promptCwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
@@ -2634,6 +2645,16 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		// MSP-backed file operations confine read/edit/write/ls to the session
+		// workspace, the same boundary the MSP bash sandbox enforces. grep/find
+		// are NOT injected: both tools reject before reaching their operations
+		// (ensureTool("rg"/"fd") returns undefined in pi-msp), and injecting
+		// find's glob with an empty no-op would make find report "No files found"
+		// instead of rejecting — worse than the status quo. When the in-process
+		// kernel is unavailable these operations fall back to plain host-filesystem
+		// behavior, so plain `node` runs are unaffected. Constructed per build
+		// like the bash ops.
+		const mspFileOps = createMspFileOperations(this._cwd);
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2642,8 +2663,11 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
+					read: { autoResizeImages, operations: mspFileOps.read },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					edit: { operations: mspFileOps.edit },
+					write: { operations: mspFileOps.write },
+					ls: { operations: mspFileOps.ls },
 				});
 
 		this._baseToolDefinitions = new Map(
