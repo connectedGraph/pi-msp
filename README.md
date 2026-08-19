@@ -1,114 +1,108 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# pi-msp — 模型操作系统沙箱里的 pi
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+pi-msp 把 [pi](https://github.com/connectedGraph/pi)（本地 AI 模型驱动的 coding agent）装进一个**进程内 MSP 沙箱内核**，让模型看到的是一个"应用拥有的操作系统语义层"，而不是宿主机器的真实文件系统。
 
-# Pi Agent Harness
+它解决的问题：编码 agent 通常让模型自由使用 `read`/`edit`/`bash` 等工具——bash 能跑到宿主任意目录、读写任意文件。pi-msp 把命令执行收敛到 MSP 虚拟 FS，工作区外对模型来说**不存在**；同时保留 pi 结构化工具的智能（截断、diff、图像处理）。
 
-This is the home of the Pi agent harness project including our self extensible coding agent.
+> 内核基于上游 [nian2026/msp](https://github.com/nian2026/msp)（Model Shell Protocol）裁剪编译。本文档只描述 pi-msp 的做法，不代表上游立场。
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+## 它是什么
 
-To learn more about Pi:
+一句话：
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+> **MSP 是一个"单命令接口 + 可注册命令"的模型操作环境。** 它收敛工具调用到一个 bash 工具，命令命名空间 = 应用注册的能力面。
 
-## All Packages
+- **数据即文件** — 应用的工作目录被投影成虚拟 FS 的根 `/`。
+- **动作即命令** — 模型用命令表达意图，命令是注册的（fake POSIX + 领域命令），不是真实二进制。
+- **权限即策略** — 工作区外的路径"不存在"，谈不上越权。
+- **执行即证据** — 每次命令执行都过内核，策略与审计收敛到单点。
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+## 架构
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
-
-## Permissions & Containerization
-
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
-
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
-
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
-
-## Development
-
-```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+```
++--------------------------------------------------------------+
+| pi-msp (bun 编译的 standalone 二进制)                          |
+|   coding-agent: read/edit/write/ls/grep/find + bash 工具       |
+|     └─ read/edit/write/ls 工具 → msp-file-operations.ts       │
+|          └─ resolveSandboxed: 路径出工作区 → "Path not found"  │
+|     └─ bash 工具 → msp-runtime.ts (bun:ffi dlopen)            │
+|          └─ mspRunJson(workspace, command)                    │
++----------------------------+---------------------------------+
+                             │ 进程内 FFI（无外部进程）
++----------------------------v---------------------------------+
+| libMSPKernel.so (Swift 编译, packages/msp-kernel)             |
+|   MSPAppleWorkspace(rootURL: workspace) → 虚拟 FS, 根 = /     |
+|   .posixCore: 117 个 fake POSIX 命令 (ls/find/rg/cat/...)    |
+|   MSPPythonCommandPack: 嵌入式 CPython (python3 拦截层)        |
++--------------------------------------------------------------+
 ```
 
-## Building standalone binaries from release source
+- **bash 工具**：命令进 `mspRunJson`，在内核虚拟 FS 上执行。内核把传入的 `workspace` 目录映射成根 `/`——GNU 命令和 Python 共享同一个映射。工作区外路径 `cat /etc/passwd` 返回 `No such file or directory`。
+- **read/edit/write/ls 工具**：仍是 pi 宿主工具（fs/promises Buffer，二进制/图像/截断/diff 不受影响），但路径先过 `resolveSandboxed`（canonicalize symlink + 判工作区前缀），出界抛 `Path not found`。与 bash 的沙箱边界一致。
+- **grep/find 工具**：宿主 rg/fd 不再下载（搜索在沙箱内经 bash 的 `rg`/`find` 兜底）。
+- **提示词虚拟化**：MSP 环境里 `Current working directory: /`，与模型在 bash 里 `pwd` 看到的根一致，不暴露真实宿主路径。
 
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
+## 构建
+
+前置：WSL Ubuntu + Swift 5.9+、Bun、Node 22+。
 
 ```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
+# 1. 编 MSP 内核（Swift → libMSPKernel.so）
+bash packages/msp-kernel/build.sh
+
+# 2. 编 workspace 包 + coding-agent
+npm install --ignore-scripts
+npm run build
+
+# 3. 编 pi-msp standalone 二进制（bun compile）
+cd packages/coding-agent
+bun build --compile --no-compile-autoload-bunfig \
+  ./dist/bun/cli.js ./src/utils/image-resize-worker.ts \
+  --outfile dist/pi-msp
+cp ../msp-kernel/swift/.build/*/libMSPKernel.so dist/
+
+# 4. 捆绑 CPython（宿主无 python 也能跑）
+bash ../msp-kernel/bundle-python.sh dist
 ```
 
-The source archive includes the generated provider model data used for the release. `--offline-model-data` builds with that snapshot instead of refreshing it from live provider catalogs. The script still installs dependencies, builds the monorepo, compiles the Bun executable, and stages its runtime assets. Package maintainers who provide dependencies separately can pass `--skip-install --skip-deps`.
+交付物（自包含，拷走即用）：
 
-## Supply-chain hardening
+```
+dist/
+├── pi-msp              # bun 编译二进制
+├── libMSPKernel.so     # MSP 内核
+└── python/             # 捆绑 CPython (libpython + stdlib)
+```
 
-We treat npm dependency changes as reviewed code changes.
+## 安装
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+```bash
+bash scripts/install-pi-msp.sh
+# → 装到 ~/.pi-msp，软链 ~/.local/bin/pi-msp
+# 自定义：--prefix <dir> --bin-dir <dir> --from <source-dir>
+```
 
-## Share your OSS coding agent sessions
+## 使用
 
-If you use Pi or other coding agents for open source work, please share your sessions.
+从任意目录启动，该目录自动成为沙箱根：
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+```bash
+cd ~/my-project
+pi-msp
+```
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
+- 模型 `pwd` → `/`；`cat /etc/passwd` → `No such file or directory`。
+- `read /etc/passwd` → `Path not found`（工具边界）。
+- python 在沙箱内可跑，文件访问走虚拟 FS broker，网络是真实网络。
 
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
+## 已知边界
 
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
+- **无持久进程 / 无持久会话**：嵌入式 python 每条命令一个新子解释器，命令返回即销毁。起不了常驻服务，跨命令无状态。
+- **网络 = 真实网络（全放）**：不建虚拟网段；shell 命令层无 curl/wget/ping，模型联网走 python。
+- **exec 默认 yield 10s**：慢命令到点截断，**输出丢失但副作用保留**（FFI 阻塞式，TS 侧超时杀不掉内核里正在跑的命令）。全盘 `find /` 在跨 VM 的 `/mnt/d` 上必撞此限。
+- **无实时流式输出**：FFI 阻塞式。
+- **pip / C 扩展不承诺**：C 扩展绕 VFS broker，有宿主访问风险。
 
-I regularly publish my own `pi-mono` work sessions here:
+## 许可证
 
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## License
-
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+MIT。pi 部分源自 [earendil-works/pi](https://github.com/earendil-works/pi)，MSP 内核源自 [nian2026/msp](https://github.com/nian2026/msp)。
