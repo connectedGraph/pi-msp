@@ -64,6 +64,24 @@ rm -rf "$PREFIX/bin/python"
 cp -r "$SOURCE_DIR/python" "$PREFIX/bin/python"
 chmod +x "$PREFIX/bin/pi-msp"
 
+# Runtime resource dirs pi-msp resolves relative to its own executable
+# (theme/dark.json, assets/, export-html/). Install script deps on the deliverable
+# having been built with copy-binary-assets (which produces these under dist/).
+for resource in theme assets export-html; do
+  if [[ -d "$SOURCE_DIR/$resource" ]]; then
+    rm -rf "$PREFIX/bin/$resource"
+    cp -r "$SOURCE_DIR/$resource" "$PREFIX/bin/$resource"
+  else
+    echo "warning: $SOURCE_DIR/$resource not found; pi-msp may fail at runtime" >&2
+  fi
+done
+
+# package.json next to the binary carries the version (pi reads --version from
+# it; missing → reports 0.0.0). copy-binary-assets puts it in dist/.
+if [[ -f "$SOURCE_DIR/package.json" ]]; then
+  cp -f "$SOURCE_DIR/package.json" "$PREFIX/bin/package.json"
+fi
+
 echo "==> linking $PREFIX/bin/pi-msp -> $BIN_DIR/pi-msp"
 mkdir -p "$BIN_DIR"
 ln -sf "$PREFIX/bin/pi-msp" "$BIN_DIR/pi-msp"
