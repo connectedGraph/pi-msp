@@ -17,6 +17,7 @@ import {
 } from "../../utils/shell.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { getMspMapper, isMspKernelAvailable, mspRunJson } from "../msp-runtime.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -85,72 +86,121 @@ export interface BashOperations {
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
+
+/**
+ * Create bash operations using pi's built-in local shell execution backend.
+ *
+ * In pi-shell (when the in-process MSP kernel libMSPKernel.so is loadable),
+ * command execution is routed through the MSP sandbox instead of the host
+ * shell. When the kernel is unavailable (plain `node` runs), this falls back
+ * to the default local shell so behavior is unchanged.
+ */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
-			const timeoutMs = resolveTimeoutMs(timeout);
-			if (signal?.aborted) {
-				throw new Error("aborted");
+		exec: async (command, cwd, execOptions) => {
+			if (await isMspKernelAvailable()) {
+				return execThroughMspKernel(command, cwd, execOptions);
 			}
-			const shellConfig = getShellConfig(options?.shellPath);
-			try {
-				await fsAccess(cwd, constants.F_OK);
-			} catch {
-				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
-			}
-
-			const commandFromStdin = shellConfig.commandTransport === "stdin";
-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
-				cwd,
-				detached: process.platform !== "win32",
-				env: env ?? getShellEnv(),
-				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
-			if (commandFromStdin) {
-				child.stdin?.on("error", () => {});
-				child.stdin?.end(command);
-			}
-			if (child.pid) trackDetachedChildPid(child.pid);
-			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
-			};
-
-			try {
-				// Set timeout if provided.
-				if (timeoutMs !== undefined) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
-					}, timeoutMs);
-				}
-				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
-				if (signal) {
-					if (signal.aborted) onAbort();
-					else signal.addEventListener("abort", onAbort, { once: true });
-				}
-				// Handle shell spawn errors and wait for the process to terminate without hanging
-				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
-				if (signal?.aborted) {
-					throw new Error("aborted");
-				}
-				if (timedOut) {
-					throw new Error(`timeout:${timeout}`);
-				}
-				return { exitCode };
-			} finally {
-				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (signal) signal.removeEventListener("abort", onAbort);
-			}
+			return execLocalShell(command, cwd, execOptions, options?.shellPath);
 		},
 	};
+}
+
+async function execThroughMspKernel(
+	command: string,
+	cwd: string,
+	{ onData, signal, timeout }: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number },
+): Promise<{ exitCode: number | null }> {
+	if (signal?.aborted) {
+		throw new Error("aborted");
+	}
+	const mapper = getMspMapper(cwd);
+	const mapped = mapper.mapCommand(command);
+	const startedAt = Date.now();
+	const result = await mspRunJson(mapped.workspace, mapped.command);
+	if (signal?.aborted) {
+		throw new Error("aborted");
+	}
+	if (timeout !== undefined && Date.now() - startedAt >= timeout * 1000) {
+		throw new Error(`timeout:${timeout}`);
+	}
+	if (result.stdout) onData(Buffer.from(result.stdout, "utf8"));
+	if (result.stderr) onData(Buffer.from(result.stderr, "utf8"));
+	return { exitCode: result.exit_code };
+}
+
+async function execLocalShell(
+	command: string,
+	cwd: string,
+	{
+		onData,
+		signal,
+		timeout,
+		env,
+	}: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv },
+	shellPath?: string,
+): Promise<{ exitCode: number | null }> {
+	const timeoutMs = resolveTimeoutMs(timeout);
+	if (signal?.aborted) {
+		throw new Error("aborted");
+	}
+	const shellConfig = getShellConfig(shellPath);
+	try {
+		await fsAccess(cwd, constants.F_OK);
+	} catch {
+		throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
+	}
+
+	const commandFromStdin = shellConfig.commandTransport === "stdin";
+	const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
+		cwd,
+		detached: process.platform !== "win32",
+		env: env ?? getShellEnv(),
+		stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+		windowsHide: true,
+	});
+	if (commandFromStdin) {
+		child.stdin?.on("error", () => {});
+		child.stdin?.end(command);
+	}
+	if (child.pid) trackDetachedChildPid(child.pid);
+	let timedOut = false;
+	let timeoutHandle: NodeJS.Timeout | undefined;
+	const onAbort = () => {
+		if (child.pid) killProcessTree(child.pid);
+	};
+
+	try {
+		// Set timeout if provided.
+		if (timeoutMs !== undefined) {
+			timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				if (child.pid) killProcessTree(child.pid);
+			}, timeoutMs);
+		}
+		// Stream stdout and stderr.
+		child.stdout?.on("data", onData);
+		child.stderr?.on("data", onData);
+		// Handle abort signal by killing the entire process tree.
+		if (signal) {
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		}
+		// Handle shell spawn errors and wait for the process to terminate without hanging
+		// on inherited stdio handles held by detached descendants.
+		const exitCode = await waitForChildProcess(child);
+		if (signal?.aborted) {
+			throw new Error("aborted");
+		}
+		if (timedOut) {
+			throw new Error(`timeout:${timeout}`);
+		}
+		return { exitCode };
+	} finally {
+		if (child.pid) untrackDetachedChildPid(child.pid);
+		if (timeoutHandle) clearTimeout(timeoutHandle);
+		if (signal) signal.removeEventListener("abort", onAbort);
+	}
 }
 
 export interface BashSpawnContext {

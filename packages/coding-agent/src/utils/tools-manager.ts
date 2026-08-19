@@ -333,42 +333,11 @@ export interface ToolStatus {
  * Returns the tool path, or undefined if unavailable.
  */
 export async function ensureTool(
-	tool: "fd" | "rg",
-	onStatus?: (status: ToolStatus) => void,
+	_tool: "fd" | "rg",
+	_onStatus?: (status: ToolStatus) => void,
 ): Promise<string | undefined> {
-	const existingPath = getToolPath(tool);
-	if (existingPath) {
-		return existingPath;
-	}
-
-	const config = TOOLS[tool];
-	if (!config) return undefined;
-
-	if (isOfflineModeEnabled()) {
-		onStatus?.({ type: "warning", message: `${config.name} not found. Offline mode enabled, skipping download.` });
-		return undefined;
-	}
-
-	// On Android/Termux, Linux binaries don't work due to Bionic libc incompatibility.
-	// Users must install via pkg.
-	if (platform() === "android") {
-		const pkgName = TERMUX_PACKAGES[tool] ?? tool;
-		onStatus?.({ type: "warning", message: `${config.name} not found. Install with: pkg install ${pkgName}` });
-		return undefined;
-	}
-
-	// Tool not found - download it
-	onStatus?.({ type: "info", message: `${config.name} not found. Downloading...` });
-
-	try {
-		const path = await downloadTool(tool);
-		onStatus?.({ type: "info", message: `${config.name} installed to ${path}` });
-		return path;
-	} catch (e) {
-		onStatus?.({
-			type: "warning",
-			message: `Failed to download ${config.name}: ${e instanceof Error ? e.message : e}`,
-		});
-		return undefined;
-	}
+	// pi-msp: host tool auto-detection/download is removed entirely. The file
+	// search commands (rg/find) live inside the MSP sandbox; the grep/find tools
+	// route through MSP instead of spawning host binaries. Nothing is downloaded.
+	return undefined;
 }
