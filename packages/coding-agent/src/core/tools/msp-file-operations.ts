@@ -96,7 +96,13 @@ export function createMspFileOperations(workspaceRoot: string): {
 			async access(absolutePath: string): Promise<void> {
 				return fsAccess(await resolve(absolutePath), constants.R_OK);
 			},
-			detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+			async detectImageMimeType(absolutePath: string): Promise<string | null | undefined> {
+				// Must resolve through the same workspace mapping as readFile/access;
+				// the default implementation reads the host path directly, which for
+				// a virtual-root absolute path like /foo would hit the host root and
+				// fail with ENOENT.
+				return detectSupportedImageMimeTypeFromFile(await resolve(absolutePath));
+			},
 		},
 		edit: {
 			async readFile(absolutePath: string): Promise<Buffer> {
