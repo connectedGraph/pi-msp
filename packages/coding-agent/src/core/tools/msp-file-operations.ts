@@ -26,8 +26,9 @@ import {
 	stat as fsStat,
 	writeFile as fsWriteFile,
 } from "node:fs/promises";
+import { join } from "node:path";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
-import { canonicalizePath } from "../../utils/paths.ts";
+import { canonicalizePath, getCwdRelativePath } from "../../utils/paths.ts";
 import { isMspKernelAvailable } from "../msp-runtime.ts";
 import type { EditOperations } from "./edit.ts";
 import type { FindOperations } from "./find.ts";
@@ -65,10 +66,24 @@ export function createMspFileOperations(workspaceRoot: string): {
 	/**
 	 * Resolve p against the workspace, enforcing the boundary when the kernel
 	 * is up; falling back to plain resolution (no boundary) when it is not.
+	 *
+	 * Paths the model passes are interpreted relative to the sandbox's virtual
+	 * root "/" (which maps to workspaceRoot). But the tool factories resolve
+	 * relative paths against the REAL cwd BEFORE reaching these operations (e.g.
+	 * edit.ts resolveToCwd(path, cwd)), so by the time we get here a relative
+	 * path is already an absolute path under the workspace — leave those alone.
+	 * A genuinely absolute path like /tmp/foo that is OUTSIDE the workspace was
+	 * passed by the model as a virtual-root path (it saw `Current working
+	 * directory: /`), so map it under the workspace root to match what the MSP
+	 * bash sandbox does (`/tmp/foo` → workspaceRoot/tmp/foo). This keeps the
+	 * structured tools and bash on the same virtual filesystem.
 	 */
 	const resolve = async (p: string): Promise<string> => {
 		if (await isMspKernelAvailable()) {
-			return resolveSandboxed(p, root, root);
+			const rel = getCwdRelativePath(canonicalizePath(p), root);
+			// Out-of-workspace absolute path → treat as virtual-root path.
+			const mapped = rel === undefined && p.startsWith("/") ? join(root, p.replace(/^\/+/, "")) : p;
+			return resolveSandboxed(mapped, root, root);
 		}
 		return resolveToCwd(p, root);
 	};

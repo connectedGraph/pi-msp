@@ -1058,8 +1058,16 @@ export class AgentSession {
 		// in the sandbox instead of the real host path, keeping prompt and shell
 		// consistent. Only affects the *displayed* cwd — tool path resolution
 		// still uses this._cwd, so relative paths keep resolving to the real host
-		// workspace that maps to the virtual root.
-		const promptCwd = isMspKernelEnvironment() ? "/" : this._cwd;
+		// workspace that maps to the virtual root. The mapping is spelled out as a
+		// guideline so the model knows `/foo` is a virtual-root path, not a host
+		// absolute path.
+		const mspEnv = isMspKernelEnvironment();
+		const promptCwd = mspEnv ? "/" : this._cwd;
+		if (mspEnv) {
+			promptGuidelines.push(
+				`The sandbox virtual root "/" maps to the real host directory ${this._cwd}. Absolute paths like /foo are paths inside this virtual root (i.e. under ${this._cwd}); the sandbox confines all access to it.`,
+			);
+		}
 
 		this._baseSystemPromptOptions = {
 			cwd: promptCwd,

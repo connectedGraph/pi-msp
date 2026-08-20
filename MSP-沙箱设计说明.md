@@ -106,6 +106,13 @@
   二进制/图像/截断/diff 不受影响。**池子层注入,coding 与只读模式共用**:
   `_buildRuntime` 一次构造全部工具 definitions(含 operations),激活集
   (`activeToolNames`)决定启用哪些——所以只读模式激活的 read/ls 同样带边界;
+- **绝对路径映射**(2026-08):模型看到虚拟根 `/`,所以它给的绝对路径 `/x/y` 会被
+  文件工具映射成 workspace 根下的 `x/y`(与 bash 侧 MSP 内核的行为一致)——避免
+  `/tmp/hello.txt` 被当成宿主路径而 ENOENT。相对路径在工具工厂已被 resolveToCwd
+  拼成 workspace 内绝对路径,保持不变。三者(bash/read/write)由此落在同一虚拟 FS;
+- **提示词暴露映射关系**(2026-08):`Current working directory: /`,并加一条 guideline
+  说明虚拟根 `/` 映射到哪个真实宿主目录、绝对路径 `/foo` 即虚拟根下路径——模型
+  不再把 `/foo` 当宿主路径。仅改显示,工具解析仍用真实 cwd;
 - grep/find **未注入边界**(当前不可用:宿主 rg/fd 被收回,`ensureTool` 返回 undefined,
   grep/find 到不了 operations 直接 reject);只读搜索由 agent 用 bash 的 `rg`/`find`
   走 MSP 内核兜底。**rg/fd 属只读模式功能,收回疑似误操作,后续可恢复**;
