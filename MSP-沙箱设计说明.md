@@ -139,28 +139,54 @@
   全盘遍历必然撞 10s。**重 I/O 搜索(全盘 find/os.walk)不该走内核**。
 
 **待修(2026-08 实测发现,按影响排序)**
-1. **exec 10s 截断返回空输出**(真实 bug):慢命令(全盘 find、重 python)到 10s yield 被
+1. **bash 与文件工具的绝对路径语义分裂**(真实 bug,2026-08-20 实测):对同一个宿主
+   workspace 内绝对路径 `/home/rap/workspace/xxx`,两套语义产生两个落点——
+   - **bash(MSP 内核)**:虚拟根 `/` = workspace,`/home/rap/workspace/xxx` 被当**虚拟根下
+     的嵌套路径**,落到 `workspace/home/rap/workspace/xxx`(实测:bash 写
+     `/home/rap/workspace/bash_probe.txt` → 宿主 `workspace/home/rap/workspace/bash_probe.txt`);
+   - **read/edit/write 工具(我的 resolve 映射)**:`/home/rap/workspace/xxx` 在 workspace 内
+     → **保持宿主路径原样**,读 `workspace/xxx` → ENOENT。
+   结果:模型用 bash 在 `/home/rap/workspace/` 写的文件,read 读同路径 ENOENT;
+   read/write 写的 `/home/rap/workspace/xxx` 和 bash 看到的不是同一位置。
+   根因:**"是否在 workspace 内"不是判断"虚拟根路径 vs 宿主路径"的正确依据**——
+   一个宿主 workspace 内的绝对路径,既可以是模型意图的"虚拟根嵌套路径"也可以是
+   "宿主真实路径"。修法方向(未定):让工具和 bash 用**同一套虚拟根语义**(所有 `/xxx`
+   一律 `workspace/xxx`,不区分是否在 workspace 内);但工具工厂的 `resolveToCwd` 会把
+   相对路径提前拼成宿主绝对路径,导致 ops 层无法区分"原本相对"vs"原本绝对",需在
+   工具 execute 层(或 ops 接口)传递原始路径/标记。**当前状态:未修复,read/write/edit
+   对 `/home/rap/workspace/xxx` 形式的路径与 bash 不一致;对 `/xxx`(workspace 外)四个
+   工具一致。**
+2. **exec 10s 截断返回空输出**(真实 bug):慢命令(全盘 find、重 python)到 10s yield 被
    `consumeRead` 截断,stdout 为空、rc=0、副作用保留——对模型表现为"命令无输出却已执行"。
    修法二选一或都做:
    a) 截断时**保留已收集的部分输出**(find 目前是攒完才写,应改成流式写或截断回传已收集部分);
    b) 调大/可配 `execYieldTimeMilliseconds`(默认 10s 面向快命令,`mspRunJson` 调用方可传)。
-2. **跨 VM 慢**:虚拟 FS stat 毫秒级,全盘遍历必撞上限。修法:内核给 VFS 加**目录/文件数量
+3. **跨 VM 慢**:虚拟 FS stat 毫秒级,全盘遍历必撞上限。修法:内核给 VFS 加**目录/文件数量
    投影上限**或**浅层优先**,或对 `/mnt/d` 走批量 stat;否则重 I/O 搜索只能走宿主 rg/fd
    (见"可能的后续 2")。
 
 **可能的后续(按价值排序)**
 1. **宿主桥接**:接 `MSPHostProcessExternalRunner`,让 git/node/npm 在 MSP 沙箱里
    以真实进程跑(路径虚拟化 + 输出 sanitize)——这是"继续桥接"的主线;
-2. **只读搜索工具**:grep/find/ls 是只读模式功能,不是完全访问模式。rg/fd 被收回疑似
+2. **审查 pi 的自动注入与 `PI_*` 环境变量泄漏面**(2026-08 记录):pi 会自动往 system
+   prompt 注入 AGENTS.md/CLAUDE.md/项目 README、`<project_context>`、skills、docs/examples
+   路径等;这些内容与路径来自**宿主真实文件系统**,可能带出沙箱外的信息,且注入内容里的
+   路径(如 docs/examples 的绝对路径)会让模型看到沙箱外的目录结构。同样,`PI_*` 环境变量
+   (PI_OFFLINE、PI_MSP_KERNEL、PI_ALLOW_LOCKFILE_CHANGE 等)透传给沙箱内进程,既是信息
+   泄漏也是潜在旁路。要做:**盘点自动注入的每一条**(哪些内容、从哪个宿主路径读、注入到
+   prompt 哪里),决定每条是保留/虚拟化/屏蔽——保留需确认内容都在沙箱工作区内;虚拟化需
+   把路径改写成沙箱视角的 `/...`;屏蔽需有开关。`PI_*` 同理:白名单哪些可进沙箱、哪些要
+   脱敏。这一步是"构造性隔离"在**输入面**的补全(目前只做了命令执行和文件工具的边界);
+3. **只读搜索工具**:grep/find/ls 是只读模式功能,不是完全访问模式。rg/fd 被收回疑似
    误操作,**后续可恢复下载**;但更彻底的方向是**用 MSP bash 的 `rg`/`find`/`ls`
    命令替代宿主 rg/fd 工具**——命令面统一、天然带工作区边界,无需宿主二进制。
    **但 2026-08 实测发现反例**:内核 `find /` 因 10s yield + 跨 VM 慢会截断返回空输出,
    而宿主 rg/fd 无此上限、直跑到底。故**重 I/O 搜索该走宿主工具**;若坚持命令面统一,
    需先解内核的跨 VM 慢与 10s 截断(见已知边界)。若走宿主 rg/fd,可评估 drop
    grep/find/ls 工具本体(只保留 read);
-3. **收敛工具面**:评估是否 drop read/edit/write,或保留 read 但走 mimeType/base64;
-4. **注册领域命令**:在 MSP 内核注册应用专属命令,把"一切皆命令"做实;
-5. **流式输出**:FFI 阻塞式改流式,让长命令不冻结 TUI。
+4. **收敛工具面**:评估是否 drop read/edit/write,或保留 read 但走 mimeType/base64;
+5. **注册领域命令**:在 MSP 内核注册应用专属命令,把"一切皆命令"做实;
+6. **流式输出**:FFI 阻塞式改流式,让长命令不冻结 TUI。
 
 ---
 
