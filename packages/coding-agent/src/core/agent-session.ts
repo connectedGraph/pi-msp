@@ -2655,8 +2655,8 @@ export class AgentSession {
 		const shellPath = this.settingsManager.getShellPath();
 		// MSP-backed file operations confine read/edit/write/ls to the session
 		// workspace, the same boundary the MSP bash sandbox enforces. grep/find
-		// are NOT injected: both tools reject before reaching their operations
-		// (ensureTool("rg"/"fd") returns undefined in pi-msp), and injecting
+		// are NOT injected: their default implementations search the host
+		// filesystem directly, and injecting
 		// find's glob with an empty no-op would make find report "No files found"
 		// instead of rejecting — worse than the status quo. When the in-process
 		// kernel is unavailable these operations fall back to plain host-filesystem

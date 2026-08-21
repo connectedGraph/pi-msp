@@ -1,3 +1,5 @@
+import { spawnSync } from "child_process";
+
 export interface ToolStatus {
 	type: "info" | "warning";
 	message: string;
@@ -9,11 +11,12 @@ export interface ToolStatus {
  * Returns the tool path, or undefined if unavailable.
  */
 export async function ensureTool(
-	_tool: "fd" | "rg",
+	tool: "fd" | "rg",
 	_onStatus?: (status: ToolStatus) => void,
 ): Promise<string | undefined> {
-	// pi-msp: host tool auto-detection/download is removed entirely. The file
-	// search commands (rg/find) live inside the MSP sandbox; the grep/find tools
-	// route through MSP instead of spawning host binaries. Nothing is downloaded.
-	return undefined;
+	// pi-msp keeps search binaries outside its release payload. Use a command
+	// only when the host already provides it; never download or install one.
+	const command = tool === "fd" ? "fd" : "rg";
+	const result = spawnSync(command, ["--version"], { stdio: "pipe" });
+	return result.error === null || result.error === undefined ? command : undefined;
 }

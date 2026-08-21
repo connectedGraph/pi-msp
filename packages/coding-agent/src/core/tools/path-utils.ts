@@ -83,7 +83,7 @@ export function assertInsideWorkspace(absolutePath: string, workspaceRoot: strin
 export function resolveSandboxed(filePath: string, cwd: string, workspaceRoot: string): string {
 	const resolved = resolveToCwd(filePath, cwd);
 	assertInsideWorkspace(resolved, workspaceRoot, filePath);
-	return resolved;
+	return canonicalizePath(resolved);
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {

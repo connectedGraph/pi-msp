@@ -145,8 +145,8 @@ export function createMspFileOperations(workspaceRoot: string): {
 					return false;
 				}
 			},
-			// glob stays on the host fd binary path; fd is not fetched in pi-msp
-			// (ensureTool returns undefined), so this remains a no-op as upstream.
+			// glob stays on the host fd binary path; pi-msp does not fetch fd,
+			// so this remains a no-op as upstream.
 			glob: () => [],
 		},
 		ls: {
