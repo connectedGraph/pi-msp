@@ -107,7 +107,6 @@ import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
-import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -450,7 +449,6 @@ export class InteractiveMode {
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
-	private managedToolStatusStarted = false;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -3431,20 +3429,6 @@ export class InteractiveMode {
 				? [{ type: "text", text: message.content }]
 				: message.content.filter((c: { type: string }) => c.type === "text");
 		return textBlocks.map((c) => (c as { text: string }).text).join("");
-	}
-
-	/** Show a managed-tool status update in the chat. */
-	private showManagedToolStatus(status: ToolStatus): void {
-		if (!this.managedToolStatusStarted) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.managedToolStatusStarted = true;
-		}
-		const message = status.type === "warning" ? `Warning: ${status.message}` : status.message;
-		const color = status.type === "warning" ? "warning" : "dim";
-		this.chatContainer.addChild(new Text(theme.fg(color, message), 1, 0));
-		this.lastStatusSpacer = undefined;
-		this.lastStatusText = undefined;
-		this.ui.requestRender();
 	}
 
 	/**
